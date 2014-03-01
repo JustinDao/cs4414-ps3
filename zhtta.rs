@@ -42,6 +42,8 @@ static COUNTER_STYLE : &'static str = "<doctype !html><html><head><title>Hello, 
              </style></head>
              <body>";
 
+pub mod gash;
+
 struct HTTP_Request {
     // Use peer_name as the key to access TcpStream in hashmap. 
 
@@ -173,7 +175,6 @@ impl WebServer {
         stream.write(msg.as_bytes());
     }
 
-    // TODO: Safe visitor counter.
     fn respond_with_counter_page(stream: Option<std::io::net::tcp::TcpStream>, count_arc: RWArc<uint>) {
         let mut stream = stream;
         let mut count: uint = 0;
@@ -203,10 +204,36 @@ impl WebServer {
         stream.write(file_reader.read_to_end());
     }
     
-    // TODO: Server-side gashing.
     fn respond_with_dynamic_page(stream: Option<std::io::net::tcp::TcpStream>, path: &Path) {
-        // for now, just serve as static file
-        WebServer::respond_with_static_file(stream, path);
+        let mut stream = stream;
+        let mut file_reader = File::open(path).expect("Invalid file!");
+        let mut response = file_reader.read_to_str();
+
+        while response.find_str("<!--#exec cmd=") != None
+        {
+            match response.find_str("<!--#exec cmd=")
+            {
+                Some(begin) =>
+                {
+                    match response.find_str("-->")
+                    {
+                        Some(end) =>
+                        {
+                            let value = response.clone();
+                            let command = value.slice(begin+15, end);
+                            let output = gash::run_cmdline(command.clone());
+                            let input_string = value.slice(begin, end+3);
+                            response = value.replace(input_string, output);
+                        }
+                        None => {}
+                    }
+                }
+                None => {}
+            }
+        }
+
+        stream.write(HTTP_OK.as_bytes());
+        stream.write(response.as_bytes());
     }
     
     // TODO: Smarter Scheduling.
