@@ -44,6 +44,8 @@ static COUNTER_STYLE : &'static str = "<doctype !html><html><head><title>Hello, 
 
 pub mod gash;
 
+
+
 struct HTTP_Request {
     // Use peer_name as the key to access TcpStream in hashmap. 
 
@@ -57,6 +59,7 @@ struct WebServer {
     ip: ~str,
     port: uint,
     www_dir_path: ~Path,
+    cached_pages: HashMap<~str, ~str>,
     
     request_queue_arc: MutexArc<~[HTTP_Request]>,
     stream_map_arc: MutexArc<HashMap<~str, Option<std::io::net::tcp::TcpStream>>>,
@@ -76,6 +79,7 @@ impl WebServer {
             ip: ip.to_owned(),
             port: port,
             www_dir_path: www_dir_path,
+            cached_pages: HashMap::new(),
                         
             request_queue_arc: MutexArc::new(~[]),
             stream_map_arc: MutexArc::new(HashMap::new()),
@@ -199,19 +203,37 @@ impl WebServer {
     // TODO: Application-layer file caching.
     fn respond_with_static_file(stream: Option<std::io::net::tcp::TcpStream>, path: &Path) {
         let mut stream = stream;
-        let mut file_reader = File::open(path).expect("Invalid file!");
-        stream.write(HTTP_OK.as_bytes());
+        // let mut cached_pages = get cached pages hash map
 
-        while !file_reader.eof()
-        {
-            let mut error = None;
-            io_error::cond.trap(|e: IoError| {
-                error = Some(e);
-            }).inside(|| {
-                let val = file_reader.read_bytes(5);
-                stream.write(val);
-            });
-        }
+        // if cached_pages.contains_key(path.as_str())
+        // {
+        //     let page = cached_pages.get(path.as_str());
+        //     stream.write(page.as_bytes());
+        // }
+        // else
+        // {
+            let mut file_reader = File::open(path).expect("Invalid file!");
+            stream.write(HTTP_OK.as_bytes());
+
+            // let mut page = ~"";
+
+            while !file_reader.eof()
+            {
+                let mut error = None;
+                io_error::cond.trap(|e: IoError| {
+                    error = Some(e);
+                }).inside(|| {
+                    let val = file_reader.read_bytes(5);
+                    stream.write(val);
+                    // page += str::from_utf8(val);
+                });
+            }
+
+            // cached_pages.insert(path.as_str(), page);
+
+        // }
+
+        
         
     }
     
