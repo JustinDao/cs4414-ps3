@@ -201,7 +201,18 @@ impl WebServer {
         let mut stream = stream;
         let mut file_reader = File::open(path).expect("Invalid file!");
         stream.write(HTTP_OK.as_bytes());
-        stream.write(file_reader.read_to_end());
+
+        while !file_reader.eof()
+        {
+            let mut error = None;
+            io_error::cond.trap(|e: IoError| {
+                error = Some(e);
+            }).inside(|| {
+                let val = file_reader.read_bytes(5);
+                stream.write(val);
+            });
+        }
+        
     }
     
     fn respond_with_dynamic_page(stream: Option<std::io::net::tcp::TcpStream>, path: &Path) {
