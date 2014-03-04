@@ -347,11 +347,11 @@ impl WebServer {
         loop {
             self.notify_port.recv();    // waiting for new request enqueued.
             
-            let mut empty_priority : bool = false;
+            let mut priority_empty : bool = false;
 
             priority_req_queue_get.access( |req_queue| {
                 match req_queue.shift_opt() { // FIFO queue.
-                    None => { empty_priority = true; }
+                    None => { priority_empty = true; }
                     Some(req) => {
                         request_chan.send(req);
                         debug!("A new request dequeued, now the length of queue is {:u}.", req_queue.len());
@@ -359,7 +359,7 @@ impl WebServer {
                 }
             });
 
-            if empty_priority
+            if priority_empty
             {
                 req_queue_get.access( |req_queue| {
                     match req_queue.shift_opt() { // FIFO queue.
