@@ -199,7 +199,6 @@ impl WebServer {
         stream.write(response.as_bytes());
     }
     
-    // TODO: Streaming file.
     // TODO: Application-layer file caching.
     fn respond_with_static_file(stream: Option<std::io::net::tcp::TcpStream>, path: &Path) {
         let mut stream = stream;
@@ -274,6 +273,9 @@ impl WebServer {
         // Save stream in hashmap for later response.
         let mut stream = stream;
         let peer_name = WebServer::get_peer_name(&mut stream);
+
+        let IP_Address = WebServer::get_ip_address_as_str(&mut stream);
+
         let (stream_port, stream_chan) = Chan::new();
         stream_chan.send(stream);
         unsafe {
@@ -335,7 +337,8 @@ impl WebServer {
                 });
             }
             
-            // TODO: Spawning more tasks to respond the dequeued requests concurrently. You may need a semophore to control the concurrency.
+            // TODO: Spawning more tasks to respond the dequeued requests concurrently. 
+            //       You may need a semophore to control the concurrency.
             let stream = stream_port.recv();
             WebServer::respond_with_static_file(stream, request.path);
             // Close stream automatically.
@@ -348,6 +351,18 @@ impl WebServer {
             Some(ref mut s) => {
                          match s.peer_name() {
                             Some(pn) => {pn.to_str()},
+                            None => (~"")
+                         }
+                       },
+            None => (~"")
+        }
+    }
+
+    fn get_ip_address_as_str(stream: &mut Option<std::io::net::tcp::TcpStream>) -> ~str {
+        match *stream {
+            Some(ref mut s) => {
+                         match s.peer_name() {
+                            Some(pn) => {pn.ip.to_str()},
                             None => (~"")
                          }
                        },
