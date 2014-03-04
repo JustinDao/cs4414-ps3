@@ -59,8 +59,8 @@ struct WebServer {
     ip: ~str,
     port: uint,
     www_dir_path: ~Path,
-    cached_pages: MutexArc<HashMap<~str, ~str>>,
-    
+
+    cached_pages_arc: MutexArc<HashMap<~str, ~str>>,    
     priority_request_arc: MutexArc<~[HTTP_Request]>,
     request_queue_arc: MutexArc<~[HTTP_Request]>,
     stream_map_arc: MutexArc<HashMap<~str, Option<std::io::net::tcp::TcpStream>>>,
@@ -80,8 +80,8 @@ impl WebServer {
             ip: ip.to_owned(),
             port: port,
             www_dir_path: www_dir_path,
-            cached_pages: MutexArc::new(HashMap::new()),
-                        
+
+            cached_pages_arc: MutexArc::new(HashMap::new()),                        
             priority_request_arc: MutexArc::new(~[]),
             request_queue_arc: MutexArc::new(~[]),
             stream_map_arc: MutexArc::new(HashMap::new()),
@@ -206,7 +206,7 @@ impl WebServer {
         stream.write(response.as_bytes());
     }
     
-    fn respond_with_static_file(&mut self, stream: Option<std::io::net::tcp::TcpStream>, path: &Path) {
+    fn respond_with_static_file(stream: Option<std::io::net::tcp::TcpStream>, path: &Path, cached_pages_arc: MutexArc<HashMap<~str,~str>>) {
         let mut stream = stream;
 
         let key : ~str =
@@ -219,7 +219,7 @@ impl WebServer {
                 None => {~""}
             };
 
-        self.cached_pages.access(|cache| {
+        cached_pages_arc.access(|cache| {
            if key != ~"" && cache.contains_key(&key)
             {
                 // println!("{}", "Pulled from cache!");
@@ -384,12 +384,18 @@ impl WebServer {
                 });
             }
             
-            // TODO: Spawning more tasks to respond the dequeued requests concurrently. 
-            //       You may need a semophore to control the concurrency.
-            let stream = stream_port.recv();
-            self.respond_with_static_file(stream, request.path);
+            let cached_pages_arc = self.cached_pages_arc.clone();
+            let (cache_port, cache_chan) = Chan::new();
+            cache_chan.send(cached_pages_arc.clone());
+
+            spawn(proc() {
+                let stream = stream_port.recv();      
+                let cached_pages_arc = cache_port.recv();          
+                WebServer::respond_with_static_file(stream, request.path, cached_pages_arc);
+                debug!("=====Terminated connection from [{:s}].=====", request.peer_name);
+            });            
             // Close stream automatically.
-            debug!("=====Terminated connection from [{:s}].=====", request.peer_name);
+            
         }
     }
     
