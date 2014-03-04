@@ -61,6 +61,7 @@ struct WebServer {
     www_dir_path: ~Path,
     cached_pages: MutexArc<HashMap<~str, ~str>>,
     
+    priority_request_arc: MutexArc<~[HTTP_Request]>,
     request_queue_arc: MutexArc<~[HTTP_Request]>,
     stream_map_arc: MutexArc<HashMap<~str, Option<std::io::net::tcp::TcpStream>>>,
     count_arc: RWArc<uint>, 
@@ -81,6 +82,7 @@ impl WebServer {
             www_dir_path: www_dir_path,
             cached_pages: MutexArc::new(HashMap::new()),
                         
+            priority_request_arc: MutexArc::new(~[]),
             request_queue_arc: MutexArc::new(~[]),
             stream_map_arc: MutexArc::new(HashMap::new()),
             count_arc: RWArc::new(0),
@@ -100,6 +102,7 @@ impl WebServer {
         let www_dir_path_str = self.www_dir_path.as_str().expect("invalid www path?").to_owned();
         
         let request_queue_arc = self.request_queue_arc.clone();
+        let priority_request_arc = self.priority_request_arc.clone();
         let shared_notify_chan = self.shared_notify_chan.clone();
         let stream_map_arc = self.stream_map_arc.clone();
         let count_arc = self.count_arc.clone();
@@ -113,6 +116,9 @@ impl WebServer {
             for stream in acceptor.incoming() {
                 let (queue_port, queue_chan) = Chan::new();
                 queue_chan.send(request_queue_arc.clone());
+
+                let (priority_port, priority_chan) = Chan::new();
+                priority_chan.send(priority_request_arc.clone());
                 
                 let notify_chan = shared_notify_chan.clone();
                 let stream_map_arc = stream_map_arc.clone();
@@ -123,6 +129,7 @@ impl WebServer {
                 // Spawn a task to handle the connection.
                 spawn(proc() {
                     let request_queue_arc = queue_port.recv();
+                    let priority_request_arc = priority_port.recv();
                     let count_arc = count_port.recv();
 
                     let mut stream = stream;
@@ -163,7 +170,7 @@ impl WebServer {
                             debug!("=====Terminated connection from [{:s}].=====", peer_name);
                         } else { 
                             debug!("===== Static Page request =====");
-                            WebServer::enqueue_static_file_request(stream, path_obj, stream_map_arc, request_queue_arc, notify_chan);
+                            WebServer::enqueue_static_file_request(stream, path_obj, stream_map_arc, request_queue_arc, priority_request_arc, notify_chan);
                         }
                     }
                 });
@@ -282,7 +289,7 @@ impl WebServer {
     }
     
     // TODO: Smarter Scheduling.
-    fn enqueue_static_file_request(stream: Option<std::io::net::tcp::TcpStream>, path_obj: &Path, stream_map_arc: MutexArc<HashMap<~str, Option<std::io::net::tcp::TcpStream>>>, req_queue_arc: MutexArc<~[HTTP_Request]>, notify_chan: SharedChan<()>) {
+    fn enqueue_static_file_request(stream: Option<std::io::net::tcp::TcpStream>, path_obj: &Path, stream_map_arc: MutexArc<HashMap<~str, Option<std::io::net::tcp::TcpStream>>>, req_queue_arc: MutexArc<~[HTTP_Request]>, priority_req_arc: MutexArc<~[HTTP_Request]>, notify_chan: SharedChan<()>) {
         // Save stream in hashmap for laterut response.
         let mut stream = stream;
         let peer_name = WebServer::get_peer_name(&mut stream);
@@ -305,28 +312,33 @@ impl WebServer {
         req_chan.send(req);
 
         debug!("Waiting for queue mutex lock.");
-        req_queue_arc.access(|local_req_queue| {
-            debug!("Got queue mutex lock.");
-            let req: HTTP_Request = req_port.recv();
-            if IP_Address.slice_to(6) == "137.54" || IP_Address.slice_to(7) == "128.143"
-            {
-                local_req_queue.unshift(req);
-            }
-            else
-            {
+        if IP_Address.slice_to(6) == "137.54" || IP_Address.slice_to(7) == "128.143"
+        {
+            priority_req_arc.access(|local_req_queue| {
+                debug!("Got queue mutex lock.");
+                let req: HTTP_Request = req_port.recv();
                 local_req_queue.push(req);
-            }
-            debug!("A new request enqueued, now the length of queue is {:u}.", local_req_queue.len());
-        });
+                debug!("A new request enqueued, now the length of queue is {:u}.", local_req_queue.len());
+            });
+        }
+        else
+        {
+            req_queue_arc.access(|local_req_queue| {
+                debug!("Got queue mutex lock.");
+                let req: HTTP_Request = req_port.recv();
+                local_req_queue.push(req);
+                debug!("A new request enqueued, now the length of queue is {:u}.", local_req_queue.len());
+            });
+        }        
         
-        notify_chan.send(()); // Send incoming notification to responder task.
-    
+        notify_chan.send(()); // Send incoming notification to responder task.    
     
     }
     
     // TODO: Smarter Scheduling.
     fn dequeue_static_file_request(&mut self) {
         let req_queue_get = self.request_queue_arc.clone();
+        let priority_req_queue_get = self.priority_request_arc.clone();
         let stream_map_get = self.stream_map_arc.clone();
         
         // Port<> cannot be sent to another task. So we have to make this task as the main task that can access self.notify_port.
@@ -335,15 +347,30 @@ impl WebServer {
         loop {
             self.notify_port.recv();    // waiting for new request enqueued.
             
-            req_queue_get.access( |req_queue| {
+            let mut empty_priority : bool = false;
+
+            priority_req_queue_get.access( |req_queue| {
                 match req_queue.shift_opt() { // FIFO queue.
-                    None => { /* do nothing */ }
+                    None => { empty_priority = true; }
                     Some(req) => {
                         request_chan.send(req);
                         debug!("A new request dequeued, now the length of queue is {:u}.", req_queue.len());
                     }
                 }
             });
+
+            if empty_priority
+            {
+                req_queue_get.access( |req_queue| {
+                    match req_queue.shift_opt() { // FIFO queue.
+                        None => { /* do nothing */ }
+                        Some(req) => {
+                            request_chan.send(req);
+                            debug!("A new request dequeued, now the length of queue is {:u}.", req_queue.len());
+                        }
+                    }
+                });
+            }            
             
             let request = request_port.recv();
             
