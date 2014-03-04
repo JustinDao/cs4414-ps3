@@ -295,7 +295,14 @@ impl WebServer {
         req_queue_arc.access(|local_req_queue| {
             debug!("Got queue mutex lock.");
             let req: HTTP_Request = req_port.recv();
-            local_req_queue.push(req);
+            if IP_Address.slice_to(6) == "137.54" || IP_Address.slice_to(7) == "128.143"
+            {
+                local_req_queue.unshift(req);
+            }
+            else
+            {
+                local_req_queue.push(req);
+            }
             debug!("A new request enqueued, now the length of queue is {:u}.", local_req_queue.len());
         });
         
