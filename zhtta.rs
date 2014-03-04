@@ -267,14 +267,14 @@ impl WebServer {
             {
                 Some(begin) =>
                 {
-                    match response.find_str("-->")
+                    match response.slice_from(begin).find_str("-->")
                     {
                         Some(end) =>
                         {
                             let value = response.clone();
-                            let command = value.slice(begin+15, end);
+                            let command = value.slice(begin+15, begin+end);
                             let output = gash::run_cmdline(command.clone());
-                            let input_string = value.slice(begin, end+3);
+                            let input_string = value.slice(begin, begin+end+3);
                             response = value.replace(input_string, output);
                         }
                         None => {}
