@@ -59,7 +59,7 @@ struct WebServer {
     ip: ~str,
     port: uint,
     www_dir_path: ~Path,
-    cached_pages: HashMap<~str, ~str>,
+    cached_pages: MutexArc<HashMap<~str, ~str>>,
     
     request_queue_arc: MutexArc<~[HTTP_Request]>,
     stream_map_arc: MutexArc<HashMap<~str, Option<std::io::net::tcp::TcpStream>>>,
@@ -79,7 +79,7 @@ impl WebServer {
             ip: ip.to_owned(),
             port: port,
             www_dir_path: www_dir_path,
-            cached_pages: HashMap::new(),
+            cached_pages: MutexArc::new(HashMap::new()),
                         
             request_queue_arc: MutexArc::new(~[]),
             stream_map_arc: MutexArc::new(HashMap::new()),
@@ -199,39 +199,52 @@ impl WebServer {
         stream.write(response.as_bytes());
     }
     
-    // TODO: Application-layer file caching.
-    fn respond_with_static_file(stream: Option<std::io::net::tcp::TcpStream>, path: &Path) {
+    fn respond_with_static_file(&mut self, stream: Option<std::io::net::tcp::TcpStream>, path: &Path) {
         let mut stream = stream;
-        // let mut cached_pages = get cached pages hash map
 
-        // if cached_pages.contains_key(path.as_str())
-        // {
-        //     let page = cached_pages.get(path.as_str());
-        //     stream.write(page.as_bytes());
-        // }
-        // else
-        // {
-            let mut file_reader = File::open(path).expect("Invalid file!");
-            stream.write(HTTP_OK.as_bytes());
-
-            // let mut page = ~"";
-
-            while !file_reader.eof()
+        let key : ~str =
+            match path.as_str()
             {
-                let mut error = None;
-                io_error::cond.trap(|e: IoError| {
-                    error = Some(e);
-                }).inside(|| {
-                    let val = file_reader.read_bytes(5);
-                    stream.write(val);
-                    // page += str::from_utf8(val);
-                });
+                Some(p) =>
+                {
+                    p.to_owned()
+                }
+                None => {~""}
+            };
+
+        self.cached_pages.access(|cache| {
+           if key != ~"" && cache.contains_key(&key)
+            {
+                // println!("{}", "Pulled from cache!");
+                let page = cache.get(&key);
+                stream.write(page.as_bytes());
+            }
+            else
+            {
+                let mut file_reader = File::open(path).expect("Invalid file!");
+                stream.write(HTTP_OK.as_bytes());
+
+                let mut page = ~"";
+
+                while !file_reader.eof()
+                {
+                    let mut error = None;
+                    io_error::cond.trap(|e: IoError| {
+                        error = Some(e);
+                    }).inside(|| {
+                        let val = file_reader.read_bytes(5);
+                        stream.write(val);
+                        page = page.clone().append(str::from_utf8(val));
+                    });
+                }
+                // println!("{}", "Inserted into cache!");
+                cache.insert(key.clone(), page.clone());
+
             }
 
-            // cached_pages.insert(path.as_str(), page);
+        });
 
-        // }
-
+        
         
         
     }
@@ -270,7 +283,7 @@ impl WebServer {
     
     // TODO: Smarter Scheduling.
     fn enqueue_static_file_request(stream: Option<std::io::net::tcp::TcpStream>, path_obj: &Path, stream_map_arc: MutexArc<HashMap<~str, Option<std::io::net::tcp::TcpStream>>>, req_queue_arc: MutexArc<~[HTTP_Request]>, notify_chan: SharedChan<()>) {
-        // Save stream in hashmap for later response.
+        // Save stream in hashmap for laterut response.
         let mut stream = stream;
         let peer_name = WebServer::get_peer_name(&mut stream);
 
@@ -347,7 +360,7 @@ impl WebServer {
             // TODO: Spawning more tasks to respond the dequeued requests concurrently. 
             //       You may need a semophore to control the concurrency.
             let stream = stream_port.recv();
-            WebServer::respond_with_static_file(stream, request.path);
+            self.respond_with_static_file(stream, request.path);
             // Close stream automatically.
             debug!("=====Terminated connection from [{:s}].=====", request.peer_name);
         }
