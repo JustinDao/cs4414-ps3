@@ -53,6 +53,7 @@ struct HTTP_Request {
     //  See issue: https://github.com/mozilla/rust/issues/12139)
     peer_name: ~str,
     path: ~Path,
+    size: u64,
 }
 
 struct WebServer {
@@ -288,7 +289,6 @@ impl WebServer {
         stream.write(response.as_bytes());
     }
     
-    // TODO: Smarter Scheduling.
     fn enqueue_static_file_request(stream: Option<std::io::net::tcp::TcpStream>, path_obj: &Path, stream_map_arc: MutexArc<HashMap<~str, Option<std::io::net::tcp::TcpStream>>>, req_queue_arc: MutexArc<~[HTTP_Request]>, priority_req_arc: MutexArc<~[HTTP_Request]>, notify_chan: SharedChan<()>) {
         // Save stream in hashmap for laterut response.
         let mut stream = stream;
@@ -307,17 +307,42 @@ impl WebServer {
         }
         
         // Enqueue the HTTP request.
-        let req = HTTP_Request { peer_name: peer_name.clone(), path: ~path_obj.clone() };
+        let stat = fs::stat(&path_obj.clone());
+        let size = stat.size;
+
+        let req = HTTP_Request { peer_name: peer_name.clone(), path: ~path_obj.clone(), size: size };
         let (req_port, req_chan) = Chan::new();
         req_chan.send(req);
+        
 
         debug!("Waiting for queue mutex lock.");
         if IP_Address.slice_to(6) == "137.54" || IP_Address.slice_to(7) == "128.143"
         {
             priority_req_arc.access(|local_req_queue| {
                 debug!("Got queue mutex lock.");
-                let req: HTTP_Request = req_port.recv();
-                local_req_queue.push(req);
+
+                if local_req_queue.len() > 0
+                {
+                   for i in range(0, local_req_queue.len())
+                    {
+                        if local_req_queue[i].size > size
+                        {
+                            let req: HTTP_Request = req_port.recv();
+                            local_req_queue.insert(i, req);
+                        }
+                        else if i == local_req_queue.len()-1
+                        {
+                            let req: HTTP_Request = req_port.recv();
+                            local_req_queue.push(req);
+                        }
+                    } 
+                }
+                else
+                {
+                    let req: HTTP_Request = req_port.recv();
+                    local_req_queue.push(req);
+                }              
+                
                 debug!("A new request enqueued, now the length of queue is {:u}.", local_req_queue.len());
             });
         }
@@ -325,8 +350,28 @@ impl WebServer {
         {
             req_queue_arc.access(|local_req_queue| {
                 debug!("Got queue mutex lock.");
-                let req: HTTP_Request = req_port.recv();
-                local_req_queue.push(req);
+                
+                if local_req_queue.len() > 0
+                {
+                   for i in range(0, local_req_queue.len())
+                    {
+                        if local_req_queue[i].size > size
+                        {
+                            let req: HTTP_Request = req_port.recv();
+                            local_req_queue.insert(i, req);
+                        }
+                        else if i == local_req_queue.len()-1
+                        {
+                            let req: HTTP_Request = req_port.recv();
+                            local_req_queue.push(req);
+                        }
+                    } 
+                }
+                else
+                {
+                    let req: HTTP_Request = req_port.recv();
+                    local_req_queue.push(req);
+                }      
                 debug!("A new request enqueued, now the length of queue is {:u}.", local_req_queue.len());
             });
         }        
@@ -334,8 +379,7 @@ impl WebServer {
         notify_chan.send(()); // Send incoming notification to responder task.    
     
     }
-    
-    // TODO: Smarter Scheduling.
+
     fn dequeue_static_file_request(&mut self) {
         let req_queue_get = self.request_queue_arc.clone();
         let priority_req_queue_get = self.priority_request_arc.clone();
