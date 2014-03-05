@@ -259,7 +259,7 @@ impl WebServer {
                 stream.write(val);                
                 page = page + val;
             }
-            println!("{}", "Inserted into cache!");
+            println!("Inserted {} into cache!", key.clone());
           
             cached_pages_arc.write(|cache| {
                 cache.insert(key.clone(), page.clone());
