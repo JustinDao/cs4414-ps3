@@ -22,6 +22,7 @@ use std::{os, str, libc, from_str};
 use std::path::Path;
 use std::hashmap::HashMap;
 use extra::arc::RWArc;
+use std::io::buffered::BufferedReader;
 
 use extra::getopts;
 use extra::arc::MutexArc;
@@ -61,7 +62,7 @@ struct WebServer {
     port: uint,
     www_dir_path: ~Path,
 
-    cached_pages_arc: MutexArc<HashMap<~str, ~str>>,    
+    cached_pages_arc: RWArc<HashMap<~str, ~[u8]>>,    
     priority_request_arc: MutexArc<~[HTTP_Request]>,
     request_queue_arc: MutexArc<~[HTTP_Request]>,
     stream_map_arc: MutexArc<HashMap<~str, Option<std::io::net::tcp::TcpStream>>>,
@@ -82,7 +83,7 @@ impl WebServer {
             port: port,
             www_dir_path: www_dir_path,
 
-            cached_pages_arc: MutexArc::new(HashMap::new()),                        
+            cached_pages_arc: RWArc::new(HashMap::new()),                        
             priority_request_arc: MutexArc::new(~[]),
             request_queue_arc: MutexArc::new(~[]),
             stream_map_arc: MutexArc::new(HashMap::new()),
@@ -180,6 +181,7 @@ impl WebServer {
     }
 
     fn respond_with_error_page(stream: Option<std::io::net::tcp::TcpStream>, path: &Path) {
+        println!("{}", "Error Page");
         let mut stream = stream;
         let msg: ~str = format!("Cannot open: {:s}", path.as_str().expect("invalid path").to_owned());
 
@@ -188,6 +190,7 @@ impl WebServer {
     }
 
     fn respond_with_counter_page(stream: Option<std::io::net::tcp::TcpStream>, count_arc: RWArc<uint>) {
+        println!("{}", "Counter Page");
         let mut stream = stream;
         let mut count: uint = 0;
 
@@ -207,7 +210,8 @@ impl WebServer {
         stream.write(response.as_bytes());
     }
     
-    fn respond_with_static_file(stream: Option<std::io::net::tcp::TcpStream>, path: &Path, cached_pages_arc: MutexArc<HashMap<~str,~str>>) {
+    fn respond_with_static_file(stream: Option<std::io::net::tcp::TcpStream>, path: &Path, cached_pages_arc: RWArc<HashMap<~str, ~[u8]>>) {
+        println!("{}", "Static File");
         let mut stream = stream;
 
         let key : ~str =
@@ -220,44 +224,54 @@ impl WebServer {
                 None => {~""}
             };
 
-        cached_pages_arc.access(|cache| {
+        let mut cached : bool = true;
+        let mut page : ~[u8] = ~[];
+
+        println!("{}", "Checking Cache");
+        cached_pages_arc.read(|cache| {
            if key != ~"" && cache.contains_key(&key)
             {
-                // println!("{}", "Pulled from cache!");
-                let page = cache.get(&key);
-                stream.write(page.as_bytes());
+                println!("{}", "Pulled from cache!");
+                let content = cache.get(&key);
+                stream.write(HTTP_OK.as_bytes());
+                stream.write(content.clone());
             }
             else
             {
-                let mut file_reader = File::open(path).expect("Invalid file!");
-                stream.write(HTTP_OK.as_bytes());
-
-                let mut page = ~"";
-
-                while !file_reader.eof()
-                {
-                    let mut error = None;
-                    io_error::cond.trap(|e: IoError| {
-                        error = Some(e);
-                    }).inside(|| {
-                        let val = file_reader.read_bytes(5);
-                        stream.write(val);
-                        page = page.clone().append(str::from_utf8(val));
-                    });
-                }
-                // println!("{}", "Inserted into cache!");
-                cache.insert(key.clone(), page.clone());
-
+                cached = false;
             }
 
         });
 
+        if !cached
+        {
+            println!("{}", "Opening File");
+            let file_reader = File::open(path).expect("Invalid file!");
+            let mut bufread = BufferedReader::new(file_reader);
+            stream.write(HTTP_OK.as_bytes());
+
+            println!("{}", "Reading File!");
+            while !bufread.eof()
+            {
+                let val = bufread.fill().to_owned();
+                bufread.consume(val.len());
+                println!("{}: Reading {} bytes", key.clone(), val.len());
+                stream.write(val);                
+                page = page + val;
+            }
+            println!("{}", "Inserted into cache!");
+          
+            cached_pages_arc.write(|cache| {
+                cache.insert(key.clone(), page.clone());
+            });
+        }
         
         
         
     }
     
     fn respond_with_dynamic_page(stream: Option<std::io::net::tcp::TcpStream>, path: &Path) {
+        println!("{}", "Dynamic Page");
         let mut stream = stream;
         let mut file_reader = File::open(path).expect("Invalid file!");
         let mut response = file_reader.read_to_str();
@@ -290,6 +304,7 @@ impl WebServer {
     }
     
     fn enqueue_static_file_request(stream: Option<std::io::net::tcp::TcpStream>, path_obj: &Path, stream_map_arc: MutexArc<HashMap<~str, Option<std::io::net::tcp::TcpStream>>>, req_queue_arc: MutexArc<~[HTTP_Request]>, priority_req_arc: MutexArc<~[HTTP_Request]>, notify_chan: SharedChan<()>) {
+        println!("{}", "Enqueue Page");
         // Save stream in hashmap for laterut response.
         let mut stream = stream;
         let peer_name = WebServer::get_peer_name(&mut stream);
@@ -343,7 +358,7 @@ impl WebServer {
                     local_req_queue.push(req);
                 }              
                 
-                debug!("A new request enqueued, now the length of queue is {:u}.", local_req_queue.len());
+                debug!("A new priority request enqueued, now the length of priority queue is {:u}.", local_req_queue.len());
             });
         }
         else
@@ -381,6 +396,7 @@ impl WebServer {
     }
 
     fn dequeue_static_file_request(&mut self) {
+        println!("{}", "Dequeue Page");
         let req_queue_get = self.request_queue_arc.clone();
         let priority_req_queue_get = self.priority_request_arc.clone();
         let stream_map_get = self.stream_map_arc.clone();
@@ -398,7 +414,7 @@ impl WebServer {
                     None => { priority_empty = true; }
                     Some(req) => {
                         request_chan.send(req);
-                        debug!("A new request dequeued, now the length of queue is {:u}.", req_queue.len());
+                        debug!("A new priority request dequeued, now the length of queue is {:u}.", req_queue.len());
                     }
                 }
             });
