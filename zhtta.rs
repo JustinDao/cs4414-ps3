@@ -26,6 +26,11 @@ use std::io::buffered::BufferedReader;
 
 use extra::getopts;
 use extra::arc::MutexArc;
+use extra::sync::Semaphore;
+
+use extra::time;
+use std::num;
+
 
 static SERVER_NAME : &'static str = "Zhtta Version 0.5";
 
@@ -68,6 +73,8 @@ struct WebServer {
     stream_map_arc: MutexArc<HashMap<~str, Option<std::io::net::tcp::TcpStream>>>,
     count_arc: RWArc<uint>, 
     
+    semaphore: Semaphore, //4 cores
+
     notify_port: Port<()>,
     shared_notify_chan: SharedChan<()>,
 }
@@ -89,6 +96,8 @@ impl WebServer {
             stream_map_arc: MutexArc::new(HashMap::new()),
             count_arc: RWArc::new(0),
             
+            semaphore: Semaphore::new(32), //TODO: should be 4
+
             notify_port: notify_port,
             shared_notify_chan: shared_notify_chan,        
         }
@@ -181,7 +190,6 @@ impl WebServer {
     }
 
     fn respond_with_error_page(stream: Option<std::io::net::tcp::TcpStream>, path: &Path) {
-        println!("{}", "Error Page");
         let mut stream = stream;
         let msg: ~str = format!("Cannot open: {:s}", path.as_str().expect("invalid path").to_owned());
 
@@ -225,9 +233,12 @@ impl WebServer {
             };
 
         let mut cached : bool = true;
-        let mut page : ~[u8] = ~[];
+        
+        let mut total = 0;
+        let file_size = path.stat().size;
 
         println!("{}", "Checking Cache");
+        
         cached_pages_arc.read(|cache| {
            if key != ~"" && cache.contains_key(&key)
             {
@@ -244,26 +255,77 @@ impl WebServer {
         });
 
         if !cached
-        {
-            println!("{}", "Opening File");
-            let file_reader = File::open(path).expect("Invalid file!");
-            let mut bufread = BufferedReader::new(file_reader);
-            stream.write(HTTP_OK.as_bytes());
-
-            println!("{}", "Reading File!");
-            while !bufread.eof()
+        {           
+            if file_size / 1000000 <= 5
             {
-                let val = bufread.fill().to_owned();
-                bufread.consume(val.len());
-                println!("{}: Reading {} bytes", key.clone(), val.len());
-                stream.write(val);                
-                page = page + val;
+                let mut page : ~[u8] = ~[];
+                println!("{}", "Opening File");
+                let file_reader = File::open(path).expect("Invalid file!");
+                let mut bufread = BufferedReader::with_capacity(512, file_reader);
+                stream.write(HTTP_OK.as_bytes());
+
+                println!("{}", "Reading File!");
+                let start = time::precise_time_s();
+                while !bufread.eof()
+                {
+                    let mut write_size;
+
+                    {
+                        let val = bufread.fill();                    
+                        write_size = val.len();
+                        // println!("{}: Reading {} bytes", key.clone(), val.len());
+                        stream.write(val);
+                        page.push_all_move(val.to_owned());                    
+                    }
+
+                    bufread.consume(write_size);
+                    total += write_size;
+                }
+                let finish = time::precise_time_s();
+                let elapsed = finish - start;
+                let bytes : f64 = num::cast(total).unwrap();
+                let bytespersecond = bytes / 1024f64 / elapsed; 
+
+                println!("{} kBi/S", bytespersecond);
+                println!("Responding with {}", key);
+                cached_pages_arc.write(|cache| {
+                    cache.insert(key.clone(), page.clone());
+                });
+
+                println!("Inserted {} into cache!", key.clone());
             }
-            println!("Inserted {} into cache!", key.clone());
-          
-            cached_pages_arc.write(|cache| {
-                cache.insert(key.clone(), page.clone());
-            });
+            else
+            {
+                println!("{}", "Opening File");
+                let file_reader = File::open(path).expect("Invalid file!");
+                let mut bufread = BufferedReader::with_capacity(512, file_reader);
+                stream.write(HTTP_OK.as_bytes());
+
+                println!("{}", "Reading File!");
+                let start = time::precise_time_s();
+                while !bufread.eof()
+                {
+                    let mut write_size;
+
+                    {
+                        let val = bufread.fill();                    
+                        write_size = val.len();
+                        //println!("{}: Reading {} bytes", key.clone(), val.len());
+                        stream.write(val)          
+                    }
+
+                    bufread.consume(write_size);
+                    total += write_size;
+                }
+                let finish = time::precise_time_s();
+                let elapsed = finish - start;
+                let bytes : f64 = num::cast(total).unwrap();
+                let bytespersecond = bytes / 1024f64 / elapsed; 
+
+                println!("{} kBi/S", bytespersecond);
+                println!("Responding with {}", key);
+            }
+            
         }
         
         
@@ -271,7 +333,6 @@ impl WebServer {
     }
     
     fn respond_with_dynamic_page(stream: Option<std::io::net::tcp::TcpStream>, path: &Path) {
-        println!("{}", "Dynamic Page");
         let mut stream = stream;
         let mut file_reader = File::open(path).expect("Invalid file!");
         let mut response = file_reader.read_to_str();
@@ -299,12 +360,38 @@ impl WebServer {
             }
         }
 
+        while response.find_str("<!--#include template=") != None
+        {
+            match response.find_str("<!--#include template=")
+            {
+                Some(begin) =>
+                {
+                    match response.slice_from(begin).find_str("-->")
+                    {
+                        Some(end) =>
+                        {
+                            let value = response.clone();
+                            let mut page = value.slice(begin+22, begin+end);
+                            page = page.trim().slice(1, page.len()-1);
+                            let page_path = from_str(page).unwrap();
+                            let mut file_reader = File::open(&page_path).expect("Invalid file!");
+                            let output = file_reader.read_to_str();
+
+                            let input_string = value.slice(begin, begin+end+3);
+                            response = value.replace(input_string, output);
+                        }
+                        None => {}
+                    }
+                }
+                None => {}
+            }
+        }
+
         stream.write(HTTP_OK.as_bytes());
         stream.write(response.as_bytes());
     }
     
     fn enqueue_static_file_request(stream: Option<std::io::net::tcp::TcpStream>, path_obj: &Path, stream_map_arc: MutexArc<HashMap<~str, Option<std::io::net::tcp::TcpStream>>>, req_queue_arc: MutexArc<~[HTTP_Request]>, priority_req_arc: MutexArc<~[HTTP_Request]>, notify_chan: SharedChan<()>) {
-        println!("{}", "Enqueue Page");
         // Save stream in hashmap for laterut response.
         let mut stream = stream;
         let peer_name = WebServer::get_peer_name(&mut stream);
@@ -322,8 +409,7 @@ impl WebServer {
         }
         
         // Enqueue the HTTP request.
-        let stat = fs::stat(&path_obj.clone());
-        let size = stat.size;
+        let size = path_obj.stat().size;
 
         let req = HTTP_Request { peer_name: peer_name.clone(), path: ~path_obj.clone(), size: size };
         let (req_port, req_chan) = Chan::new();
@@ -396,7 +482,6 @@ impl WebServer {
     }
 
     fn dequeue_static_file_request(&mut self) {
-        println!("{}", "Dequeue Page");
         let req_queue_get = self.request_queue_arc.clone();
         let priority_req_queue_get = self.priority_request_arc.clone();
         let stream_map_get = self.stream_map_arc.clone();
@@ -448,11 +533,22 @@ impl WebServer {
             let (cache_port, cache_chan) = Chan::new();
             cache_chan.send(cached_pages_arc.clone());
 
+            let key : ~str;
+            {
+                key = request.path.as_str().unwrap().to_owned();
+            }
+
+            self.semaphore.acquire();
+            println!("Semaphore Acquired for {}", key);
+            let semaphore = self.semaphore.clone();
+
             spawn(proc() {
                 let stream = stream_port.recv();      
                 let cached_pages_arc = cache_port.recv();          
                 WebServer::respond_with_static_file(stream, request.path, cached_pages_arc);
                 debug!("=====Terminated connection from [{:s}].=====", request.peer_name);
+                semaphore.release();
+                println!("Semaphore Released for {}", key);
             });            
             // Close stream automatically.
             
